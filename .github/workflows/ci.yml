@@ -1,0 +1,104 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }}, SQLite)
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build
+        run: go build ./...
+      - name: Test
+        run: go test -race -count=1 ./...
+
+  integration:
+    name: Integration (Postgres, MySQL, SQLite)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: seeder
+          POSTGRES_DB: turboseeder_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s --health-timeout 3s --health-retries 10
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: seeder
+          MYSQL_DATABASE: turboseeder_test
+        ports: ['3306:3306']
+        options: >-
+          --health-cmd "mysqladmin ping -uroot -pseeder"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+    env:
+      TURBOSEEDER_PG_DSN: postgres://postgres:seeder@localhost:5432/turboseeder_test?sslmode=disable
+      TURBOSEEDER_MYSQL_DSN: root:seeder@tcp(localhost:3306)/turboseeder_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      # Service containers cannot take server flags, so turn on LOAD DATA
+      # LOCAL INFILE (needed by the MySQL CSV loader) at runtime.
+      - name: Enable local_infile on MySQL
+        run: docker exec ${{ job.services.mysql.id }} mysql -uroot -pseeder -e "SET GLOBAL local_infile = 1"
+      - name: Test against SQLite, Postgres and MySQL
+        run: go test -race -count=1 -v ./... 2>&1 | tee test.log; exit ${PIPESTATUS[0]}
+      - name: Assert Postgres and MySQL suites ran
+        run: |
+          # A missing DSN makes those subtests skip silently; fail instead.
+          for db in postgres mysql; do
+            n=$(grep -cE -- "--- PASS: Test[A-Za-z]+/$db " test.log || true)
+            echo "$db: $n passing subtests"
+            [ "$n" -ge 20 ] || { echo "expected the $db suite to run"; exit 1; }
+          done
+      - name: CLI smoke test
+        run: |
+          go run ./cmd/turboseeder check     -driver pgx   -dsn "$TURBOSEEDER_PG_DSN"
+          go run ./cmd/turboseeder check     -driver mysql -dsn "$TURBOSEEDER_MYSQL_DSN"
+          go run ./cmd/turboseeder benchmark -driver pgx   -dsn "$TURBOSEEDER_PG_DSN"    -rows 50000 -workers 1,2
+          go run ./cmd/turboseeder benchmark -driver mysql -dsn "$TURBOSEEDER_MYSQL_DSN" -rows 50000 -workers 1,2
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "These files need gofmt:"
+            echo "$unformatted"
+            exit 1
+          fi
+      - name: go vet
+        run: go vet ./...
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: latest
+      - name: Tidy check
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum

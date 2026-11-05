@@ -1,0 +1,19 @@
+# Binaries
+/turboseeder
+*.exe
+*.test
+
+# Coverage and profiles
+*.out
+*.prof
+
+# Local databases
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Editors and OS
+.idea/
+.vscode/
+.DS_Store

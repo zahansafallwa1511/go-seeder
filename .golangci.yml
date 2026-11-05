@@ -1,0 +1,14 @@
+version: "2"
+
+linters:
+  settings:
+    errcheck:
+      exclude-functions:
+        # bufio.Writer errors are sticky: the loaders check them at the end of
+        # every row and on Flush, so checking each small write is noise.
+        - (*bufio.Writer).WriteByte
+        - (*bufio.Writer).WriteString
+  exclusions:
+    presets:
+      # Unchecked Close/Flush/print on cleanup paths, as in the standard library.
+      - std-error-handling
